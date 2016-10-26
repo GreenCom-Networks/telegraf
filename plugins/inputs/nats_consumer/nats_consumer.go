@@ -28,6 +28,10 @@ type natsConsumer struct {
 	Servers    []string
 	Secure     bool
 
+	// Client pending limits:
+	PendingMessageLimit int
+	PendingBytesLimit   int
+
 	// Legacy metric buffer support
 	MetricBuffer int
 
@@ -54,6 +58,11 @@ var sampleConfig = `
   subjects = ["telegraf"]
   ## name a queue group
   queue_group = "telegraf_consumers"
+
+  ## Sets the limits for pending msgs and bytes for each subscription
+  ## These shouldn't need to be adjusted except in very high throughput scenarios
+  # pending_message_limit = 65536
+  # pending_bytes_limit = 67108864
 
   ## Data format to consume.
   ## Each data format has it's own unique set of configuration options, read
@@ -105,10 +114,15 @@ func (n *natsConsumer) Start(acc telegraf.Accumulator) error {
 		n.errs = make(chan error)
 		n.Conn.SetErrorHandler(n.natsErrHandler)
 
-		n.in = make(chan *nats.Msg)
+		n.in = make(chan *nats.Msg, 1000)
 		for _, subj := range n.Subjects {
-			sub, err := n.Conn.ChanQueueSubscribe(subj, n.QueueGroup, n.in)
+			sub, err := n.Conn.QueueSubscribe(subj, n.QueueGroup, func(m *nats.Msg) {
+				n.in <- m
+			})
 			if err != nil {
+				return err
+			}
+			if err = sub.SetPendingLimits(n.PendingMessageLimit, n.PendingBytesLimit); err != nil {
 				return err
 			}
 			n.Subs = append(n.Subs, sub)
@@ -179,6 +193,9 @@ func (n *natsConsumer) Gather(acc telegraf.Accumulator) error {
 
 func init() {
 	inputs.Add("nats_consumer", func() telegraf.Input {
-		return &natsConsumer{}
+		return &natsConsumer{
+			PendingBytesLimit:   nats.DefaultSubPendingBytesLimit,
+			PendingMessageLimit: nats.DefaultSubPendingMsgsLimit,
+		}
 	})
 }
